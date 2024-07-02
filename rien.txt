@@ -1,0 +1,63 @@
+import pyaudio
+import cv2
+import numpy as np
+import threading
+
+# Configuration vidéo
+cap = cv2.VideoCapture(0)  # Webcam USB (ajustez l'index si nécessaire)
+
+# Configuration audio
+CHUNK = 1024
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 44100
+
+p = pyaudio.PyAudio()
+
+# Ouvrir les flux audio pour les deux microphones et les deux haut-parleurs
+stream_mic1 = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK, input_device_index=5)  # C270 HD WEBCAM
+stream_speaker1 = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK, output_device_index=0)  # HDMI output
+
+stream_mic2 = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK, input_device_index=3)  # USB PnP Sound Device
+stream_speaker2 = p.open(format=FORMAT, channels=CHANNELS, rate=RATE, output=True, frames_per_buffer=CHUNK, output_device_index=1)  # Headphones output
+
+def audio_stream1():
+    while True:
+        data = stream_mic1.read(CHUNK)
+        stream_speaker1.write(data)
+
+def audio_stream2():
+    while True:
+        data = stream_mic2.read(CHUNK)
+        stream_speaker2.write(data)
+
+# Démarrer les threads audio
+threading.Thread(target=audio_stream1, daemon=True).start()
+threading.Thread(target=audio_stream2, daemon=True).start()
+
+# Boucle principale pour l'affichage vidéo
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    cv2.imshow('Interphone', frame)
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Nettoyage
+cap.release()
+cv2.destroyAllWindows()
+
+stream_mic1.stop_stream()
+stream_mic1.close()
+stream_speaker1.stop_stream()
+stream_speaker1.close()
+
+stream_mic2.stop_stream()
+stream_mic2.close()
+stream_speaker2.stop_stream()
+stream_speaker2.close()
+
+p.terminate()
