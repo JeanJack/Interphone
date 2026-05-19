@@ -1,0 +1,5 @@
+aiohttp>=3.9.0
+python-socketio>=5.10.0
+aiohttp-jinja2>=1.6
+RPi.GPIO>=0.7.1
+aiofiles>=23.0

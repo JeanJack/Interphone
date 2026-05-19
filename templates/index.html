@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interphone</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+        h1 {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .status {
+            color: #0f0;
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
+        }
+        .status.disconnected {
+            color: #f44;
+        }
+        .video-container {
+            width: 100%;
+            max-width: 640px;
+            background: #000;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+        .video-container img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        .video-offline {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            aspect-ratio: 4/3;
+            color: #666;
+            font-size: 1.1rem;
+        }
+        .controls {
+            width: 100%;
+            max-width: 640px;
+            margin-top: 1rem;
+            display: flex;
+            gap: 0.5rem;
+        }
+        .btn {
+            flex: 1;
+            padding: 1rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+        .btn:active {
+            opacity: 0.7;
+        }
+        .btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        .btn-answer {
+            background: #4CAF50;
+            color: #fff;
+        }
+        .btn-hangup {
+            background: #f44336;
+            color: #fff;
+        }
+        .btn-gate {
+            background: #2196F3;
+            color: #fff;
+        }
+        .btn-gate.open {
+            background: #FF9800;
+        }
+        .incoming-call {
+            display: none;
+            width: 100%;
+            max-width: 640px;
+            background: #ff5722;
+            color: #fff;
+            text-align: center;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-top: 1rem;
+            font-size: 1.2rem;
+            font-weight: 600;
+            animation: pulse 1s infinite;
+        }
+        .incoming-call.active {
+            display: block;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+    </style>
+</head>
+<body>
+    <h1>Interphone</h1>
+    <p id="status" class="status">Connexion...</p>
+
+    <div class="video-container">
+        <img id="video" src="/video_feed" alt="Flux vidéo"
+             onerror="this.style.display='none'; document.getElementById('video-fallback').style.display='flex';">
+        <div id="video-fallback" class="video-offline" style="display:none;">
+            Camera hors ligne
+        </div>
+    </div>
+
+    <div id="incoming" class="incoming-call">
+        Quelqu'un sonne !
+    </div>
+
+    <div class="controls">
+        <button id="btn-answer" class="btn btn-answer" onclick="answerCall()">
+            Parler
+        </button>
+        <button id="btn-hangup" class="btn btn-hangup" onclick="hangupCall()" disabled>
+            Raccrocher
+        </button>
+        <button id="btn-gate" class="btn btn-gate" onclick="toggleGate()">
+            Ouvrir portail
+        </button>
+    </div>
+
+    <!-- Element audio caché pour la lecture en mode média -->
+    <audio id="playback-audio" style="display:none;"></audio>
+
+    <script src="/static/socket.io.min.js"></script>
+    <script>
+        const SAMPLE_RATE = 48000;
+        const socket = io();
+        const statusEl = document.getElementById('status');
+        const btnAnswer = document.getElementById('btn-answer');
+        const btnHangup = document.getElementById('btn-hangup');
+        const btnGate = document.getElementById('btn-gate');
+        const incomingEl = document.getElementById('incoming');
+        const playbackEl = document.getElementById('playback-audio');
+
+        let gateOpen = false;
+        let inCall = false;
+
+        // Audio capture (micro téléphone)
+        let micStream = null;
+        let micAudioCtx = null;
+        let captureProcessor = null;
+
+        // Audio playback (son du visiteur) — via <audio> element = mode média
+        let audioQueue = [];
+        let isPlaying = false;
+
+        // === Socket.IO ===
+
+        socket.on('connect', () => {
+            statusEl.textContent = 'Serveur en ligne';
+            statusEl.classList.remove('disconnected');
+        });
+
+        socket.on('disconnect', () => {
+            statusEl.textContent = 'Connexion perdue...';
+            statusEl.classList.add('disconnected');
+        });
+
+        socket.on('gate_status', (data) => {
+            gateOpen = data.is_open;
+            updateGateButton();
+        });
+
+        socket.on('incoming_call', (data) => {
+            incomingEl.classList.add('active');
+            if (navigator.vibrate) {
+                navigator.vibrate([500, 200, 500, 200, 500]);
+            }
+        });
+
+        socket.on('call_answered', () => {
+            incomingEl.classList.remove('active');
+            inCall = true;
+            btnAnswer.disabled = true;
+            btnHangup.disabled = false;
+        });
+
+        socket.on('call_ended', () => {
+            incomingEl.classList.remove('active');
+            inCall = false;
+            btnAnswer.disabled = false;
+            btnHangup.disabled = true;
+            stopAudio();
+        });
+
+        socket.on('call_timeout', () => {
+            incomingEl.classList.remove('active');
+            inCall = false;
+            btnAnswer.disabled = false;
+            btnHangup.disabled = true;
+            stopAudio();
+        });
+
+        // Audio reçu du micro extérieur → queue de lecture
+        socket.on('audio_data', (data) => {
+            if (!inCall) return;
+            const pcmBytes = new Uint8Array(data);
+            audioQueue.push(pcmBytes);
+            // Limiter la queue pour éviter la latence
+            while (audioQueue.length > 8) {
+                audioQueue.shift();
+            }
+            playNextChunk();
+        });
+
+        // === Fonctions ===
+
+        function toggleGate() {
+            socket.emit('toggle_gate');
+        }
+
+        function updateGateButton() {
+            if (gateOpen) {
+                btnGate.textContent = 'Fermer portail';
+                btnGate.classList.add('open');
+            } else {
+                btnGate.textContent = 'Ouvrir portail';
+                btnGate.classList.remove('open');
+            }
+        }
+
+        async function answerCall() {
+            socket.emit('answer');
+            await startAudio();
+        }
+
+        function hangupCall() {
+            socket.emit('hangup');
+            stopAudio();
+        }
+
+        // === Audio ===
+
+        function logUI(msg) {
+            statusEl.textContent = msg;
+            console.log(msg);
+        }
+
+        // Crée un fichier WAV complet à partir de données PCM S16LE mono
+        function pcmToWav(pcmData) {
+            const dataLen = pcmData.length;
+            const buffer = new ArrayBuffer(44 + dataLen);
+            const view = new DataView(buffer);
+            // RIFF
+            view.setUint32(0, 0x52494646, false);
+            view.setUint32(4, 36 + dataLen, true);
+            view.setUint32(8, 0x57415645, false);
+            // fmt
+            view.setUint32(12, 0x666d7420, false);
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, SAMPLE_RATE, true);
+            view.setUint32(28, SAMPLE_RATE * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            // data
+            view.setUint32(36, 0x64617461, false);
+            view.setUint32(40, dataLen, true);
+            new Uint8Array(buffer, 44).set(pcmData);
+            return buffer;
+        }
+
+        // Concatène plusieurs chunks PCM et joue le tout d'un coup
+        function playNextChunk() {
+            if (isPlaying || audioQueue.length === 0) return;
+            isPlaying = true;
+
+            // Prendre tous les chunks disponibles pour réduire les gaps
+            let totalLen = 0;
+            for (const chunk of audioQueue) totalLen += chunk.length;
+            const merged = new Uint8Array(totalLen);
+            let offset = 0;
+            for (const chunk of audioQueue) {
+                merged.set(chunk, offset);
+                offset += chunk.length;
+            }
+            audioQueue = [];
+
+            const wavBuffer = pcmToWav(merged);
+            const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+            const url = URL.createObjectURL(blob);
+
+            playbackEl.src = url;
+            playbackEl.play().then(() => {
+                // OK
+            }).catch(e => {
+                console.warn('Playback error:', e);
+                isPlaying = false;
+            });
+
+            playbackEl.onended = () => {
+                URL.revokeObjectURL(url);
+                isPlaying = false;
+                // Jouer le prochain batch s'il y en a
+                if (audioQueue.length > 0) {
+                    playNextChunk();
+                }
+            };
+        }
+
+        async function startAudio() {
+            try {
+                // --- Écoute : les chunks arrivent via socket 'audio_data' ---
+                audioQueue = [];
+                isPlaying = false;
+                logUI('Ecoute active');
+
+                // --- Capture micro téléphone → serveur ---
+                try {
+                    micStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true,
+                        }
+                    });
+
+                    micAudioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: SAMPLE_RATE
+                    });
+                    if (micAudioCtx.state === 'suspended') {
+                        await micAudioCtx.resume();
+                    }
+
+                    const source = micAudioCtx.createMediaStreamSource(micStream);
+                    captureProcessor = micAudioCtx.createScriptProcessor(2048, 1, 1);
+                    captureProcessor.onaudioprocess = (e) => {
+                        if (!inCall) return;
+                        const float32 = e.inputBuffer.getChannelData(0);
+                        const int16 = new Int16Array(float32.length);
+                        for (let i = 0; i < float32.length; i++) {
+                            const s = Math.max(-1, Math.min(1, float32[i]));
+                            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                        }
+                        socket.emit('audio_input', int16.buffer);
+                    };
+                    source.connect(captureProcessor);
+                    captureProcessor.connect(micAudioCtx.destination);
+                    logUI('Audio bidirectionnel actif');
+                } catch (micErr) {
+                    logUI('Ecoute seule (micro refusé : ' + micErr.message + ')');
+                    console.warn('Micro refusé:', micErr);
+                }
+            } catch (err) {
+                logUI('Erreur audio : ' + err.message);
+                console.error('Erreur audio :', err);
+            }
+        }
+
+        function stopAudio() {
+            if (captureProcessor) {
+                captureProcessor.disconnect();
+                captureProcessor = null;
+            }
+            if (micStream) {
+                micStream.getTracks().forEach(t => t.stop());
+                micStream = null;
+            }
+            if (micAudioCtx) {
+                micAudioCtx.close();
+                micAudioCtx = null;
+            }
+            playbackEl.pause();
+            playbackEl.src = '';
+            audioQueue = [];
+            isPlaying = false;
+        }
+    </script>
+</body>
+</html>
